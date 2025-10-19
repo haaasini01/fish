@@ -7,6 +7,9 @@ const { ethers } = require("ethers");
 // In a real application, this would be stored in a database
 let pendingRequests = [];
 let requestIdCounter = 1;
+// In-memory list of approved/authorized inspectors (simple cache)
+// Each entry: { id, address, timestamp, approvedAt }
+let approvedInspectors = [];
 
 // Test route to verify server is working
 router.get("/test", (req, res) => {
@@ -29,6 +32,11 @@ const validateAddress = (req, res, next) => {
     return res.status(400).json({ message: "Invalid Ethereum address" });
   }
   next();
+};
+
+// Helper to safely extract tx hash from wrapper result which may be { tx, receipt } or a raw tx
+const getTxHash = (result) => {
+  return (result && result.tx && result.tx.hash) ? result.tx.hash : (result && result.hash) ? result.hash : null;
 };
 
 async function checkSyncStatus() {
@@ -77,7 +85,7 @@ router.post("/fisheries/logcatch", async (req, res) => {
     
     res.json({
       message: "Fish catch logged successfully",
-      txHash: result.tx.hash
+      txHash: getTxHash(result)
     });
 
   } catch (error) {
@@ -102,7 +110,7 @@ router.post("/fisheries/updatesustainability", async (req, res) => {
       message: "Sustainability updated successfully",
       batchId,
       sustainable,
-      txHash: result.tx.hash
+      txHash: getTxHash(result)
     });
   } catch (error) {
     console.error("Error updating sustainability:", error);
@@ -117,9 +125,9 @@ router.post('/fisheries/raiseDispute', async (req, res) => {
   const { batchId, reason } = req.body;
   if (!batchId) return res.status(400).json({ message: 'batchId required' });
   try {
-    const tx = await contracts.fisheriesManagement.raiseDispute(Number(batchId), reason || "");
-    await tx.wait();
-    res.json({ message: 'Dispute raised', batchId, txHash: tx.hash });
+  const result = await contracts.fisheriesManagement.raiseDispute(Number(batchId), reason || "");
+  const txHash = getTxHash(result);
+  res.json({ message: 'Dispute raised', batchId, txHash });
   } catch (error) {
     console.error('Error raising dispute:', error);
     res.status(500).json({ message: error.message || 'Failed to raise dispute' });
@@ -167,7 +175,7 @@ router.put("/fisheries/updateweight/:batchId", async (req, res) => {
       message: "Weight updated successfully",
       batchId: batchId,
       newWeight: weight,
-      txHash: result.tx.hash
+      txHash: getTxHash(result)
     });
   } catch (error) {
     console.error("Error updating weight:", error);
@@ -203,8 +211,8 @@ router.post("/marketplace/list", async (req, res) => {
 
     res.json({
       message: "Fish listed successfully",
-      listingId: result.tx.hash, // Adjust this based on how you want to track listing ID
-      txHash: result.tx.hash
+      listingId: getTxHash(result), // Adjust this based on how you want to track listing ID
+      txHash: getTxHash(result)
     });
   } catch (error) {
     console.error("Error listing fish:", error);
@@ -269,9 +277,9 @@ router.post('/marketplace/adjustListingPrice', async (req, res) => {
   if (!listingId || isNaN(Number(listingId))) return res.status(400).json({ message: 'Invalid listingId' });
   if (!newPricePerKg || isNaN(Number(newPricePerKg))) return res.status(400).json({ message: 'Invalid newPricePerKg' });
   try {
-    const tx = await contracts.fishMarketplace.adjustListingPrice(Number(listingId), Number(newPricePerKg));
-    await tx.wait();
-    res.json({ message: 'Listing price adjusted', txHash: tx.hash });
+  const result = await contracts.fishMarketplace.adjustListingPrice(Number(listingId), Number(newPricePerKg));
+  const txHash = getTxHash(result);
+  res.json({ message: 'Listing price adjusted', txHash });
   } catch (error) {
     console.error('Error adjusting listing price:', error);
     res.status(500).json({ message: error.message || 'Failed to adjust listing price' });
@@ -282,15 +290,15 @@ router.post('/marketplace/adjustListingPrice', async (req, res) => {
 router.post("/marketplace/buy/:listingId", async (req, res) => {
   const { weight, value } = req.body;
   try {
-    const tx = await contracts.fishMarketplace.buyFish(
+    const result = await contracts.fishMarketplace.buyFish(
       req.params.listingId,
       weight,
       {
         value: ethers.parseEther(value.toString()),
       }
     );
-    // await tx.wait();
-    res.json({ message: "Fish purchased successfully", txHash: tx.hash });
+  const txHash = getTxHash(result);
+  res.json({ message: "Fish purchased successfully", txHash });
   } catch (error) {
     console.error("Error buying fish:", error);
     res.status(500).json({ message: `Error buying fish: ${error.message}` });
@@ -301,13 +309,14 @@ router.post("/marketplace/buy/:listingId", async (req, res) => {
 router.post("/transfer/record", async (req, res) => {
   const { batchId, stage } = req.body;
   try {
-    const tx = await contracts.fishTransfer.recordTransfer(batchId, stage);
-    const receipt = await tx.wait();
-    const event = receipt.events?.find((e) => e.event === "TransferRecorded");
+    const result = await contracts.fishTransfer.recordTransfer(batchId, stage);
+  const receipt = result && result.receipt ? result.receipt : null;
+  const event = receipt?.events?.find((e) => e.event === "TransferRecorded");
+  const txHash = getTxHash(result);
     res.json({
       message: "Transfer recorded successfully",
-      transferId: event?.args?.transferId.toString(),
-      txHash: tx.hash,
+      transferId: event?.args?.transferId?.toString(),
+      txHash,
     });
   } catch (error) {
     console.error("Error recording transfer:", error);
@@ -345,20 +354,26 @@ router.post("/inspector/authorize", validateAddress, async (req, res) => {
     }
     
     // Call smart contract to authorize inspector
-    const tx = await contracts.inspectorAuthorization.authorizeInspector(address);
-    await tx.wait();
+  const result = await contracts.inspectorAuthorization.authorizeInspector(address);
+  // result may be { tx, receipt } or raw tx; wrapper already waits, so use receipt if needed
+  const txHash = getTxHash(result);
     
     // Update request status to approved
     pendingRequests[requestIndex].status = "approved";
     pendingRequests[requestIndex].approvedAt = Math.floor(Date.now() / 1000);
-    pendingRequests[requestIndex].txHash = tx.hash;
+  pendingRequests[requestIndex].txHash = txHash;
     
-    console.log(`✅ Inspector authorized: ${address} (TX: ${tx.hash})`);
+    // Add to approved inspectors cache if not already present
+    if (!approvedInspectors.find(i => i.address.toLowerCase() === address.toLowerCase())) {
+      approvedInspectors.push({ id: pendingRequests[requestIndex].id, address, timestamp: pendingRequests[requestIndex].timestamp, approvedAt: pendingRequests[requestIndex].approvedAt });
+    }
+
+    console.log(`✅ Inspector authorized: ${address} (TX: ${txHash})`);
     console.log(`📊 Remaining pending requests: ${pendingRequests.filter(r => r.status === "pending").length}`);
     
     res.json({ 
       message: "Inspector authorized successfully", 
-      txHash: tx.hash,
+      txHash,
       requestId: pendingRequests[requestIndex].id
     });
   } catch (error) {
@@ -373,9 +388,13 @@ router.post("/inspector/authorize", validateAddress, async (req, res) => {
 router.post("/inspector/revoke", validateAddress, async (req, res) => {
   const { address } = req.body;
   try {
-    const tx = await contracts.inspectorAuthorization.revokeInspector(address);
-    await tx.wait();
-    res.json({ message: "Inspector revoked successfully", txHash: tx.hash });
+  const result = await contracts.inspectorAuthorization.revokeInspector(address);
+  const txHash = getTxHash(result);
+
+  // Remove from approved inspectors cache
+  approvedInspectors = approvedInspectors.filter(i => i.address.toLowerCase() !== address.toLowerCase());
+
+  res.json({ message: "Inspector revoked successfully", txHash });
   } catch (error) {
     console.error("Error revoking inspector:", error);
     res.status(500).json({ message: `Error revoking inspector: ${error.message}` });
@@ -527,10 +546,9 @@ router.get("/inspector/pending-requests", async (req, res) => {
 // get authorized inspectors
 router.get("/inspector/authorized-inspectors", async (req, res) => {
   try {
-    // In a real application, you'd maintain a list of authorized inspectors
-    // For now, return empty array
+    // Return the in-memory approved inspectors cache
     res.json({ 
-      inspectors: []
+      inspectors: approvedInspectors
     });
   } catch (error) {
     console.error("Error fetching authorized inspectors:", error);
@@ -542,7 +560,7 @@ router.get("/inspector/authorized-inspectors", async (req, res) => {
 router.get("/inspector/government", async (req, res) => {
   try {
     // This would typically come from the contract or environment
-    const governmentAddress = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"; // Default Hardhat account
+    const governmentAddress = "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707"; // Default Hardhat account
     res.json({ government: governmentAddress });
   } catch (error) {
     console.error("Error fetching government address:", error);
@@ -613,12 +631,12 @@ router.post("/pricing/adjust/:listingId", async (req, res) => {
     const basePrice = Number(listing[5]); // pricePerKg
 
     // Call the smart contract
-    const tx = await contracts.priceAdjustment.adjustPrice(
+    const result = await contracts.priceAdjustment.adjustPrice(
       listingId,
       sustainabilityFactor,
       freshnessFactor
     );
-    await tx.wait();
+  const txHash = getTxHash(result);
 
     // Optional: Fetch new price to confirm adjustment
     const updatedListing = await contracts.fishMarketplace.getListingDetails(listingId);
@@ -631,7 +649,7 @@ router.post("/pricing/adjust/:listingId", async (req, res) => {
       sustainabilityFactor,
       freshnessFactor,
       newPrice,
-      txHash: tx.hash,
+      txHash,
     });
   } catch (error) {
     console.error("Error adjusting price:", error);
@@ -648,11 +666,12 @@ router.post("/govt/reportStolen", async (req, res) => {
   const { batchId } = req.body;
 
   try {
-    const result = await contracts.govt.reportStolen(batchId);
+  const result = await contracts.govt.reportStolen(batchId);
+  const txHash = getTxHash(result);
     res.json({
       message: "Batch reported as stolen",
       batchId,
-      txHash: result.tx.hash
+      txHash
     });
   } catch (error) {
     console.error("Error reporting stolen batch:", error);
@@ -665,12 +684,13 @@ router.post("/govt/payInsurance/dispute", async (req, res) => {
   const { batchId, amount } = req.body;
 
   try {
-    const result = await contracts.govt.payInsuranceForDisputeBatch(batchId, amount);
+  const result = await contracts.govt.payInsuranceForDisputeBatch(batchId, amount);
+  const txHash = getTxHash(result);
     res.json({
       message: "Insurance paid for disputed batch",
       batchId,
       amount,
-      txHash: result.tx.hash
+      txHash
     });
   } catch (error) {
     console.error("Error paying insurance for dispute:", error);
@@ -688,7 +708,7 @@ router.post("/govt/payInsurance/stolen", async (req, res) => {
       message: "Insurance paid for stolen batch",
       batchId,
       amount,
-      txHash: result.tx.hash
+      txHash: getTxHash(result)
     });
   } catch (error) {
     console.error("Error paying insurance for stolen batch:", error);
@@ -706,7 +726,7 @@ router.post("/govt/buyBack", async (req, res) => {
       message: "Government buyback executed",
       listingId,
       weight,
-      txHash: result.tx.hash
+      txHash: getTxHash(result)
     });
   } catch (error) {
     console.error("Error executing buyback:", error);
@@ -718,8 +738,9 @@ router.post("/govt/buyBack", async (req, res) => {
 router.post("/govt/deposit", async (req, res) => {
   const { value } = req.body;
   try {
-    const tx = await contracts.govt.deposit({ value: ethers.parseEther(value.toString()) });
-    res.json({ message: "Funds deposited successfully", txHash: tx.hash });
+    const result = await contracts.govt.deposit({ value: ethers.parseEther(value.toString()) });
+    const txHash = getTxHash(result);
+    res.json({ message: "Funds deposited successfully", txHash });
   } catch (error) {
     console.error("Error depositing funds:", error);
     res.status(500).json({ message: error.message || "Deposit failed" });
@@ -728,11 +749,12 @@ router.post("/govt/deposit", async (req, res) => {
 router.post("/govt/withdraw", async (req, res) => {
   const { amount, to } = req.body;
   try {
-    const tx = await contracts.govt.withdraw(
+    const result = await contracts.govt.withdraw(
       ethers.parseEther(amount.toString()),
       to
     );
-    res.json({ message: "Withdrawal successful", txHash: tx.hash });
+    const txHash = getTxHash(result);
+    res.json({ message: "Withdrawal successful", txHash });
   } catch (error) {
     console.error("Error withdrawing funds:", error);
     res.status(500).json({ message: error.message || "Withdrawal failed" });
