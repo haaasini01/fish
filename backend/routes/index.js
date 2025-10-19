@@ -11,6 +11,94 @@ let requestIdCounter = 1;
 // Each entry: { id, address, timestamp, approvedAt }
 let approvedInspectors = [];
 
+// Rebuild approvedInspectors from on-chain events at startup and subscribe to future events
+async function rebuildApprovedInspectors() {
+  try {
+    console.log('Rebuilding approvedInspectors cache from on-chain events...');
+    approvedInspectors = []; // reset
+
+    // Try to read past events via contract - ethers v6 doesn't have getPastEvents; rely on scanning listings/holders if available
+    // Fallback: query authorizedInspectors mapping for a small set of known accounts is impractical; instead try to subscribe to future events and
+    // attempt a best-effort reconstruction by scanning the chain for InspectorAuthorized/InspectorRevoked logs using provider
+
+    const inspectorContract = contracts.inspectorAuthorization; // wrapper
+    const rawContract = inspectorContract && inspectorContract._contract ? inspectorContract._contract : null;
+    // Our createContractWrapper doesn't expose the raw ethers.Contract, so attempt to recreate one for event scanning
+    let provider = null;
+    try {
+      provider = new ethers.JsonRpcProvider(process.env.RPC_URL || 'http://127.0.0.1:8545');
+    } catch (e) {
+      console.warn('Could not create provider for event scanning:', e.message || e);
+    }
+
+    // If we can get an ABI and address, create a temporary contract to query events
+    try {
+      const inspectorAddr = process.env.INSPECTOR_AUTHORIZATION_CONTRACT_ADDRESS;
+      const inspectorABI = require('../artifacts/contracts/InspectorAuthorization.sol/InspectorAuthorization.json').abi;
+      if (provider && inspectorAddr && inspectorABI) {
+        const ethersContract = new ethers.Contract(inspectorAddr, inspectorABI, provider);
+
+        // Query all InspectorAuthorized events from block 0 to latest (works for local/dev chains)
+        const fromBlock = 0;
+        const toBlock = 'latest';
+        const filterAuth = ethersContract.filters.InspectorAuthorized();
+        const logsAuth = await provider.getLogs({ ...filterAuth, fromBlock, toBlock, address: inspectorAddr });
+        const iface = new ethers.Interface(inspectorABI);
+        for (const log of logsAuth) {
+          try {
+            const parsed = iface.parseLog(log);
+            const inspectorAddrLog = parsed.args.inspector || parsed.args[0];
+            if (inspectorAddrLog) {
+              const addr = inspectorAddrLog.toString();
+              if (!approvedInspectors.find(i => i.address.toLowerCase() === addr.toLowerCase())) {
+                approvedInspectors.push({ id: null, address: addr, timestamp: Math.floor(Date.now()/1000), approvedAt: Math.floor(Date.now()/1000) });
+              }
+            }
+          } catch (e) { /* ignore parse errors */ }
+        }
+
+        // Remove those which are revoked
+        const filterRev = ethersContract.filters.InspectorRevoked();
+        const logsRev = await provider.getLogs({ ...filterRev, fromBlock, toBlock, address: inspectorAddr });
+        for (const log of logsRev) {
+          try {
+            const parsed = iface.parseLog(log);
+            const addr = (parsed.args.inspector || parsed.args[0]).toString();
+            approvedInspectors = approvedInspectors.filter(i => i.address.toLowerCase() !== addr.toLowerCase());
+          } catch (e) { /* ignore */ }
+        }
+
+        console.log(`Rebuilt approvedInspectors cache: ${approvedInspectors.length} entries`);
+
+        // Subscribe to future events to keep cache updated
+        ethersContract.on('InspectorAuthorized', (inspector) => {
+          try {
+            const addr = inspector.toString();
+            if (!approvedInspectors.find(i => i.address.toLowerCase() === addr.toLowerCase())) {
+              approvedInspectors.push({ id: null, address: addr, timestamp: Math.floor(Date.now()/1000), approvedAt: Math.floor(Date.now()/1000) });
+              console.log(`InspectorAuthorized event: ${addr} -> added to cache`);
+            }
+          } catch (e) { console.warn('Error handling InspectorAuthorized event', e); }
+        });
+
+        ethersContract.on('InspectorRevoked', (inspector) => {
+          try {
+            const addr = inspector.toString();
+            approvedInspectors = approvedInspectors.filter(i => i.address.toLowerCase() !== addr.toLowerCase());
+            console.log(`InspectorRevoked event: ${addr} -> removed from cache`);
+          } catch (e) { console.warn('Error handling InspectorRevoked event', e); }
+        });
+      } else {
+        console.warn('Skipping event scan: missing provider/inspector contract details');
+      }
+    } catch (e) {
+      console.warn('Error during inspector event scan/subscription:', e && e.message ? e.message : e);
+    }
+  } catch (e) {
+    console.error('Failed to rebuild approvedInspectors:', e && e.message ? e.message : e);
+  }
+}
+
 // Test route to verify server is working
 router.get("/test", (req, res) => {
   res.json({ 
@@ -158,6 +246,47 @@ router.get("/fisheries/batch/:batchId", async (req, res) => {
   }
 });
 
+// list all fish batches (for inspector dashboard)
+router.get('/fisheries/batches', async (req, res) => {
+  try {
+    // optional query params for pagination
+    const limit = req.query.limit ? Number(req.query.limit) : null;
+    const offset = req.query.offset ? Number(req.query.offset) : 0;
+
+    const nextIdRaw = await contracts.fisheriesManagement.nextBatchId();
+    const nextId = Number(nextIdRaw);
+    const results = [];
+
+    // iterate from 1 to nextId-1
+    for (let i = 1; i < nextId; i++) {
+      if (limit !== null && results.length >= limit) break;
+      if (i < offset) continue;
+
+      try {
+        const b = await contracts.fisheriesManagement.getFishBatch(i);
+        results.push({
+          id: Number(b[0].toString()),
+          fisher: b[1],
+          weight: b[2].toString(),
+          pricePerKg: b[3].toString(),
+          isSold: b[4],
+          inDispute: b[5],
+          sustainable: b[6],
+          transferIds: Array.isArray(b[7]) ? b[7].map(x => x.toString()) : []
+        });
+      } catch (err) {
+        // skip missing batches
+        console.warn('Skipping batch', i, err.message || err);
+      }
+    }
+
+    res.json(results);
+  } catch (error) {
+    console.error('Error fetching batches:', error);
+    res.status(500).json({ message: error.message || 'Failed to fetch batches' });
+  }
+});
+
 // update weight of batch
 // ***************************************************************
 router.put("/fisheries/updateweight/:batchId", async (req, res) => {
@@ -209,10 +338,116 @@ router.post("/marketplace/list", async (req, res) => {
       pricePerKg
     );
 
+    // Try to extract listingId from the transaction receipt events (if the contract emits it)
+    const receipt = result && (result.receipt || null);
+    // Detailed logging: dump receipt and each event's name + args for debugging
+    try {
+      if (receipt) {
+        console.log('Listing transaction receipt:', JSON.stringify(receipt, (k, v) => {
+          // Replace big objects like provider with simple markers to avoid huge output
+          if (k === 'transaction' || k === 'logs' || k === 'raw') return '[REDACTED]';
+          return v;
+        }, 2));
+      } else {
+        console.log('No transaction receipt available for listFish result. Raw result:', JSON.stringify(result, (k, v) => { try { return (v && typeof v === 'object' && v._isBigNumber) ? v.toString() : v; } catch(e){ return String(v); } }, 2));
+      }
+
+      if (receipt && Array.isArray(receipt.events) && receipt.events.length > 0) {
+        console.log(`Receipt contains ${receipt.events.length} event(s):`);
+        receipt.events.forEach((ev, idx) => {
+          try {
+            const evName = ev.event || ev.eventName || ev.name || `event_${idx}`;
+            const args = ev.args;
+            let argsRepr = null;
+            try {
+              if (Array.isArray(args)) {
+                argsRepr = args.map(a => (a && typeof a.toString === 'function') ? a.toString() : JSON.stringify(a)).join(', ');
+              } else if (args && typeof args === 'object') {
+                const obj = {};
+                Object.keys(args).forEach(k => {
+                  try { obj[k] = (args[k] && typeof args[k].toString === 'function') ? args[k].toString() : args[k]; } catch(e) { obj[k] = String(args[k]); }
+                });
+                argsRepr = JSON.stringify(obj);
+              } else {
+                argsRepr = String(args);
+              }
+            } catch (e) {
+              argsRepr = '<<unserializable>>';
+            }
+            console.log(`  Event[${idx}] ${evName} -> args: ${argsRepr}`);
+          } catch (e) {
+            console.warn('Error logging event entry', e && e.message ? e.message : e);
+          }
+        });
+      } else {
+        console.log('Receipt contains no events');
+      }
+    } catch (e) {
+      console.warn('Error while logging receipt/events:', e && e.message ? e.message : e);
+    }
+    let listingId = null;
+    if (receipt && receipt.events && Array.isArray(receipt.events)) {
+      for (const ev of receipt.events) {
+        if (ev && ev.args) {
+          // Common pattern: first arg or named 'listingId'
+          if (ev.args.listingId) {
+            listingId = ev.args.listingId.toString();
+            break;
+          }
+          // fallback to first positional arg
+          if (ev.args[0]) {
+            try { listingId = ev.args[0].toString(); break; } catch (e) { /* ignore */ }
+          }
+        }
+      }
+    }
+
+    const txHash = getTxHash(result);
+
+    // If we couldn't extract listingId from the receipt, try to inspect the latest listing
+    if (!listingId) {
+      try {
+        const nextListing = await contracts.fishMarketplace.nextListingId();
+        const lastIndex = Number(nextListing) - 1;
+        if (lastIndex > 0) {
+          const lastListing = await contracts.fishMarketplace.getListingDetails(lastIndex);
+          const lastBatchId = Number(lastListing[1].toString());
+          if (lastBatchId === Number(batchId)) {
+            listingId = lastIndex.toString();
+          }
+        }
+      } catch (e) {
+        console.warn('Could not determine listingId from contract state', e && e.message ? e.message : e);
+      }
+    }
+
+    // If we have a numeric listingId, fetch and return the parsed listing for frontend convenience
+    let parsedListing = null;
+    try {
+      const numericId = listingId && !isNaN(Number(listingId)) ? Number(listingId) : null;
+      if (numericId) {
+        const listingDetails = await contracts.fishMarketplace.getListingDetails(numericId);
+        parsedListing = {
+          listingId: listingDetails[0].toString(),
+          batchId: listingDetails[1].toString(),
+          fisher: listingDetails[2],
+          totalWeight: listingDetails[3].toString(),
+          availableWeight: listingDetails[4].toString(),
+          pricePerKg: listingDetails[5].toString(),
+          isSoldOut: listingDetails[6]
+        };
+      }
+    } catch (e) {
+      console.warn('Could not fetch parsed listing after create:', e && e.message ? e.message : e);
+    }
+
+    console.debug('Listing result', { batchId, listingId, txHash, parsedListing });
+
     res.json({
       message: "Fish listed successfully",
-      listingId: getTxHash(result), // Adjust this based on how you want to track listing ID
-      txHash: getTxHash(result)
+      listingId: listingId || txHash,
+      txHash,
+      parsedListing
     });
   } catch (error) {
     console.error("Error listing fish:", error);
@@ -268,6 +503,44 @@ router.get('/marketplace/listings', async (req, res) => {
   } catch (error) {
     console.error('Error fetching listings:', error);
     res.status(500).json({ message: error.message || 'Failed to fetch listings' });
+  }
+});
+
+// Adjust listing price by batchId (helper endpoint)
+router.post('/marketplace/adjustByBatch', async (req, res) => {
+  // Accept either `newPricePerKg` or `newPrice` (frontend may send `newPrice`)
+  const { batchId } = req.body;
+  const rawNewPrice = req.body.newPricePerKg ?? req.body.newPrice ?? req.body.new_price;
+
+  if (!batchId) return res.status(400).json({ message: 'batchId required' });
+  if (rawNewPrice === undefined || rawNewPrice === null || rawNewPrice === '') return res.status(400).json({ message: 'newPricePerKg (or newPrice) required' });
+
+  const newPriceNum = Number(rawNewPrice);
+  if (isNaN(newPriceNum)) return res.status(400).json({ message: 'Invalid new price' });
+
+  try {
+    const nextId = await contracts.fishMarketplace.nextListingId();
+    const n = Number(nextId);
+    let found = false;
+    let resultTx = null;
+    for (let i = 1; i < n; i++) {
+      const listing = await contracts.fishMarketplace.getListingDetails(i);
+      const listingBatchId = Number(listing[1].toString());
+      if (listingBatchId === Number(batchId)) {
+        // Adjust this listing
+        resultTx = await contracts.fishMarketplace.adjustListingPrice(i, newPriceNum);
+        found = true;
+        break;
+      }
+    }
+
+    if (!found) return res.status(404).json({ message: 'Listing for batchId not found' });
+
+    const txHash = getTxHash(resultTx);
+    res.json({ message: 'Price adjusted', txHash });
+  } catch (error) {
+    console.error('Error adjusting listing by batch:', error);
+    res.status(500).json({ message: error.message || 'Failed to adjust listing by batch' });
   }
 });
 
@@ -810,3 +1083,48 @@ router.get('/govt/addresses', async (req, res) => {
 
 
 module.exports = router;
+
+// Rebuild approved inspectors cache at module load
+(async () => {
+  try {
+    await rebuildApprovedInspectors();
+  } catch (e) {
+    console.warn('rebuildApprovedInspectors failed at startup:', e && e.message ? e.message : e);
+  }
+})();
+
+// Developer debug: fetch transaction receipt and parse events where possible
+router.get('/debug/tx/:txHash', async (req, res) => {
+  const txHash = req.params.txHash;
+  try {
+    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL || 'http://127.0.0.1:8545');
+    const receipt = await provider.getTransactionReceipt(txHash);
+    if (!receipt) return res.status(404).json({ message: 'Receipt not found yet' });
+
+    // Try to parse logs using known ABIs
+    const parsed = [];
+    const tryParseWithAbi = (address, abi) => {
+      try {
+        const iface = new ethers.Interface(abi);
+        for (const log of receipt.logs.filter(l => l.address && l.address.toLowerCase() === (address||'').toLowerCase())) {
+          try {
+            const p = iface.parseLog(log);
+            parsed.push({ address: log.address, name: p.name, args: p.args });
+          } catch (e) { /* ignore */ }
+        }
+      } catch (e) { /* ignore */ }
+    };
+
+    // Attempt parse with marketplace ABI
+    try {
+      const marketAddr = process.env.MARKETPLACE_CONTRACT_ADDRESS || null;
+      const marketABI = require('../artifacts/contracts/FishMarketplace.sol/FishMarketplace.json').abi;
+      if (marketABI) tryParseWithAbi(marketAddr, marketABI);
+    } catch (e) { /* ignore */ }
+
+    res.json({ receipt, parsedLogs: parsed });
+  } catch (error) {
+    console.error('Error fetching tx receipt:', error);
+    res.status(500).json({ message: error.message || 'Failed to fetch tx receipt' });
+  }
+});

@@ -31,6 +31,8 @@ async function attemptInspectorLogin(btn) {
 totalBatches = 0;
 let currentUserAddress = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"; // Default Hardhat account
 let isGovernment = true; // Set as government for testing
+// Track which inspector section/tab is currently active to preserve UI across refreshes
+let currentInspectorSection = null;
 
 // Initialize user address and check government status
 async function initializeUser() {
@@ -405,7 +407,6 @@ async function loadGovernmentAuthForm() {
                         </div>
                         
                         <button type="submit" class="auth-btn">
-                            <div class="btn-icon">🔑</div>
                             <span>Authenticate</span>
                         </button>
                     </form>
@@ -818,6 +819,11 @@ async function loadGovernmentDashboard() {
         `;
         
         formContainer.innerHTML = dashboardHTML;
+
+        // Restore previously active inspector tab (so refresh doesn't force Pending)
+        if (currentInspectorSection) {
+            try { showInspectorSection(currentInspectorSection); } catch (e) { /* ignore */ }
+        }
         
     } catch (error) {
         console.error('Error loading government dashboard:', error);
@@ -1488,8 +1494,14 @@ async function loadInspectorDashboard() {
             </div>
         `;
         
-        // Fetch fish batches (this would be a real API call in production)
-        const batches = await fetchFishBatches();
+    // Preserve currently active inspector section (so polling/refresh doesn't force Pending)
+    const currentInspectorTab = document.querySelector('.inspector-tab.active');
+    const activeInspectorSection = currentInspectorTab ? currentInspectorTab.id.replace('-tab','') : null;
+    // Save to global so other pages (like GOVT) can attempt to restore it safely
+    if (activeInspectorSection) currentInspectorSection = activeInspectorSection;
+
+    // Fetch fish batches (this would be a real API call in production)
+    const batches = await fetchFishBatches();
         
         let dashboardHTML = `
             <div class="inspector-dashboard">
@@ -1500,7 +1512,7 @@ async function loadInspectorDashboard() {
                 
                 <!-- Inspector Dashboard Navigation -->
                 <div class="inspector-nav">
-                    <button onclick="showInspectorSection('pending')" class="inspector-tab active" id="pending-tab">⏳ Pending Approval</button>
+                    <button onclick="showInspectorSection('pending')" class="inspector-tab" id="pending-tab">⏳ Pending Approval</button>
                     <button onclick="showInspectorSection('remaining')" class="inspector-tab" id="remaining-tab">🟦 Remaining Batches</button>
                     <button onclick="showInspectorSection('sold')" class="inspector-tab" id="sold-tab">🟩 Sold Batches</button>
                 </div>
@@ -1634,7 +1646,7 @@ async function loadInspectorDashboard() {
                             <div class="action-buttons">
                                 <button onclick="addTransferId(${batch.id})" class="btn-transfer">📦 Add Transfer</button>
                                 <button onclick="openPriceAdjustment(${batch.id})" class="btn-price">💰 Price Adjustment</button>
-                                <button onclick="listToMarket(${batch.id})" class="btn-list" ${batch.sustainable ? '' : 'disabled'}>📋 List to Market</button>
+                                <!-- Listing happens automatically when batch is approved as sustainable -->
                             </div>
                         </td>
                     </tr>
@@ -2075,6 +2087,8 @@ function showInspectorSection(section) {
     document.getElementById('pending-section').style.display = section === 'pending' ? 'block' : 'none';
     document.getElementById('remaining-section').style.display = section === 'remaining' ? 'block' : 'none';
     document.getElementById('sold-section').style.display = section === 'sold' ? 'block' : 'none';
+    // Persist the current inspector section so refreshes/polls don't reset it
+    try { currentInspectorSection = section; } catch (e) { /* ignore */ }
 }
 
 // Refresh batches - called from Quick Actions
@@ -2106,11 +2120,36 @@ async function setSustainability(batchId, isSustainable) {
             showNotification(`Batch marked as ${isSustainable ? 'sustainable' : 'unsustainable'}!`, 'success');
             if (!isSustainable) {
                 await addToDisputeList(batchId);
+                await loadInspectorDashboard();
             } else {
-                // Open price adjustment flow next
-                openPriceAdjustment(batchId);
+                // When marking as sustainable, prompt the inspector for optional pricing factors
+                // These factors will be applied immediately after the listing is created.
+                try {
+                    const wantFactors = confirm('Would you like to apply sustainability/freshness factors to adjust the listing price now?');
+                    if (wantFactors) {
+                        // Prompt for sustainability factor and freshness factor (numbers, e.g. 0.9, 1.0, 1.1)
+                        let sStr = prompt('Enter sustainability factor (e.g. 0.9 for -10%, 1.0 for no change)', '1.0');
+                        if (sStr === null) sStr = '1.0';
+                        let fStr = prompt('Enter freshness factor (e.g. 0.95 for -5%, 1.0 for no change)', '1.0');
+                        if (fStr === null) fStr = '1.0';
+
+                        const s = parseFloat(sStr);
+                        const f = parseFloat(fStr);
+                        if (!isNaN(s) && !isNaN(f)) {
+                            // Save pending factors globally so listToMarket can apply them after the listing appears
+                            window.__pendingPriceFactors = { s, f };
+                        } else {
+                            showNotification('Invalid factors entered; proceeding without factor-based adjustment.', 'warning');
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Factor prompt cancelled or failed', e);
+                }
+
+                // If marked sustainable, automatically list to market but DO NOT redirect to Market
+                // listToMarket will refresh the inspector dashboard when done and apply any pending factors
+                await listToMarket(batchId, false);
             }
-            await loadInspectorDashboard();
         } else {
             showNotification('Failed to update sustainability status', 'error');
         }
@@ -2198,29 +2237,60 @@ async function approveBatch(batchId) {
     }
 }
 
-// Add to dispute list when marked unsustainable
-async function addToDisputeList(batchId) {
+// (duplicate addToDisputeList removed — single implementation above is used)
+
+// Open price adjustment: prompt for a new absolute price and call backend to adjust by batchId
+async function openPriceAdjustment(batchId) {
     try {
-        await fetch(`http://localhost:8080/api/government/add-dispute/${batchId}`, {
-            method: 'POST'
+        showNotification('Locating listing for batch...', 'info');
+
+        // Prompt the inspector for the new price per kg (absolute value in ETH)
+        const newPriceStr = prompt('Enter new price per kg (in ETH), e.g. 0.05', '0.00');
+        if (newPriceStr === null) return; // user cancelled
+        const newPrice = parseFloat(newPriceStr);
+        if (isNaN(newPrice) || newPrice < 0) {
+            showNotification('Invalid price entered', 'error');
+            return;
+        }
+
+        showNotification('Submitting price update...', 'info');
+
+        // Call backend endpoint which attempts to find the listing by batch and adjust its price
+        const resp = await fetch('http://localhost:8080/api/marketplace/adjustByBatch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ batchId: parseInt(batchId), newPrice: parseFloat(newPrice) })
         });
-        showNotification('Batch added to dispute list', 'warning');
+
+        if (!resp.ok) {
+            const txt = await resp.text();
+            console.error('adjustByBatch failed:', txt);
+            showNotification('Failed to adjust listing price: ' + (txt || resp.statusText), 'error');
+            return;
+        }
+
+        const result = await resp.json();
+        console.debug('openPriceAdjustment - backend response:', result);
+
+        if (result.success) {
+            showNotification('✅ Listing price updated', 'success');
+        } else {
+            // If backend couldn't find listing by batch, it may have adjusted by listingId; show message
+            showNotification(result.message || 'Listing price update submitted', 'info');
+        }
+
+        // Refresh UI: Market and inspector dashboard
+        setTimeout(() => loadForm('Market'), 700);
+        await loadInspectorDashboard();
+
     } catch (error) {
-        console.error('Error adding to dispute list:', error);
+        console.error('Error in openPriceAdjustment:', error);
+        showNotification('Error updating price: ' + error.message, 'error');
     }
 }
 
-// Set price factors and apply on listing
-async function openPriceAdjustment(batchId) {
-    const sustainabilityFactor = prompt('Enter sustainability factor as percentage (e.g., 110 for +10%)', '100');
-    const freshnessFactor = prompt('Enter freshness factor as percentage (e.g., 95 for -5%)', '100');
-    if (!sustainabilityFactor || !freshnessFactor) return;
-    showNotification('Factors saved. Please list to market to apply pricing.', 'info');
-    window.__pendingPriceFactors = { s: parseInt(sustainabilityFactor), f: parseInt(freshnessFactor) };
-}
-
 // List batch to market
-async function listToMarket(batchId) {
+async function listToMarket(batchId, doRedirect = true) {
     try {
         showNotification('Listing batch to market...', 'info');
         // Fetch batch details
@@ -2231,15 +2301,48 @@ async function listToMarket(batchId) {
         const listResp = await fetch(`http://localhost:8080/api/marketplace/list`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ batchId: parseInt(batchId), weight: parseInt(batch.weight), pricePerKg: parseInt(batch.pricePerKg) })
+            body: JSON.stringify({ batchId: parseInt(batchId), weight: parseFloat(batch.weight), pricePerKg: parseFloat(batch.pricePerKg) })
         });
         if (!listResp.ok) { showNotification('Failed to list batch to market', 'error'); return; }
-        const listResult = await listResp.json();
-        const listingId = listResult.listingId;
-        // Apply price adjustment if factors saved
-        const factors = window.__pendingPriceFactors;
-        if (listingId && factors) {
-            const adjResp = await fetch(`http://localhost:8080/api/pricing/adjust/${listingId}`, {
+    const listResult = await listResp.json();
+    console.debug('listToMarket - backend response:', listResult);
+    let listingIdRaw = listResult.listingId || listResult.txHash || null;
+    const parsedListing = listResult.parsedListing || null;
+
+    // Try to derive a numeric listingId in multiple ways:
+    // 1) parsedListing.listingId (preferred)
+    // 2) numeric listingIdRaw
+    // 3) search marketplace listings for one with matching batchId
+    let numericListingId = null;
+    if (parsedListing && parsedListing.listingId && !isNaN(Number(parsedListing.listingId))) {
+        numericListingId = Number(parsedListing.listingId);
+    } else if (listingIdRaw && !isNaN(Number(listingIdRaw))) {
+        numericListingId = Number(listingIdRaw);
+    }
+
+    // If still not found, attempt to find a listing that matches this batchId
+    if (!numericListingId) {
+        try {
+            const allResp = await fetch('http://localhost:8080/api/marketplace/listings');
+            if (allResp.ok) {
+                const all = await allResp.json();
+                const listings = Array.isArray(all) ? all : (all.listings || all);
+                // Prefer listings that match batchId and are not sold out, newest first
+                const matches = (listings || []).filter(l => Number(l.batchId) === Number(batchId) && !l.isSoldOut).sort((a,b)=> Number(b.listingId)-Number(a.listingId));
+                if (matches.length > 0) {
+                    numericListingId = Number(matches[0].listingId);
+                }
+            }
+        } catch (e) {
+            console.warn('Could not search listings to determine listingId:', e);
+        }
+    }
+
+    // Apply price adjustment if factors saved and we have a numeric listing id
+    const factors = window.__pendingPriceFactors;
+    if (numericListingId && factors) {
+        try {
+            const adjResp = await fetch(`http://localhost:8080/api/pricing/adjust/${numericListingId}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ sustainabilityFactor: factors.s, freshnessFactor: factors.f })
@@ -2247,14 +2350,25 @@ async function listToMarket(batchId) {
             if (adjResp.ok) {
                 delete window.__pendingPriceFactors;
                 showNotification('✅ Listed and price adjusted. Redirecting to Market...', 'success');
+                // Prefer redirecting to market so fetched listings include the new one
                 setTimeout(() => loadForm('Market'), 1200);
             } else {
+                const txt = await adjResp.text();
+                console.warn('Price adjust returned non-ok:', txt);
                 showNotification('Listed, but price adjustment failed', 'error');
             }
-        } else {
-            showNotification('✅ Listed. Adjust price via Price Adjustment if needed.', 'success');
+        } catch (e) {
+            console.error('Error applying price factors:', e);
+            showNotification('Listed, but price adjustment request failed', 'error');
         }
-        await loadInspectorDashboard();
+    } else {
+        showNotification('✅ Listed.', 'success');
+        // Only redirect to Market if caller requested it (default true). For inspector flows we pass false.
+        if (doRedirect) setTimeout(() => loadForm('Market'), 800);
+    }
+
+    // Refresh inspector dashboard after short delay
+    setTimeout(() => { loadInspectorDashboard(); }, 1400);
     } catch (error) {
         console.error('Error listing to market:', error);
         showNotification('Error listing to market', 'error');
