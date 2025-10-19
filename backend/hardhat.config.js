@@ -1,5 +1,4 @@
 require("dotenv").config();  // Loads .env file
-require("ethers");
 require("@nomicfoundation/hardhat-toolbox");
 require('hardhat-deploy');  // Required for the deploy plugin
 

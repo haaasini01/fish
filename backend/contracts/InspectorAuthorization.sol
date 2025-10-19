@@ -7,6 +7,7 @@ contract InspectorAuthorization {
 
     event InspectorAuthorized(address inspector);
     event InspectorRevoked(address inspector);
+    event GovernmentChanged(address newGovernment);
 
     modifier onlyGovernment() {
         require(
@@ -18,6 +19,13 @@ contract InspectorAuthorization {
 
     constructor() {
         government = msg.sender;
+    }
+
+    /// @notice Set a new government address. Callable only by current government.
+    function setGovernment(address newGovernment) external onlyGovernment {
+        require(newGovernment != address(0), "Invalid address");
+        government = newGovernment;
+        emit GovernmentChanged(newGovernment);
     }
 
     function authorizeInspector(address inspector) public onlyGovernment {

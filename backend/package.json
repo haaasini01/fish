@@ -5,21 +5,20 @@
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
     "hardhat": "^2.22.16",
-    "hardhat-deploy": "^0.14.0"
+    "hardhat-deploy": "^1.0.4"
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node app.js",
+    "dev": "node start-server.js"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@ignored/hardhat-ignition": "^0.3.0",
-    "@nomicfoundation/hardhat-ethers": "^3.0.8",
     "body-parser": "^1.20.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "ethers": "^6.13.4",
+    "ethers": "^6.15.0",
     "express": "^4.21.1"
   },
   "description": ""

@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.27;
 
+import "./InspectorAuthorization.sol";
+
 contract FisheriesManagement {
     address public government;
     uint256 public nextBatchId = 1;
+    InspectorAuthorization public inspectorAuth;
 
     struct FishBatch {
         uint256 id;
@@ -39,6 +42,12 @@ contract FisheriesManagement {
         government = msg.sender;
     }
 
+    /// @notice set inspector authorization contract address (only government)
+    function setInspectorAuthorization(address addr) external {
+        require(msg.sender == government, "Only government can set inspector authorization");
+        inspectorAuth = InspectorAuthorization(addr);
+    }
+
     function logCatch(uint256 weight, uint256 pricePerKg) public {
         batches[nextBatchId] = FishBatch(
             nextBatchId,
@@ -57,7 +66,14 @@ contract FisheriesManagement {
     function updateSustainability(
         uint256 batchId,
         bool sustainable
-    ) public onlyGovernment {
+    ) public {
+        // Allow either government or an authorized inspector to update sustainability
+        if (address(inspectorAuth) == address(0)) {
+            require(msg.sender == government, "Only government can call this function");
+        } else {
+            require(msg.sender == government || inspectorAuth.authorizedInspectors(msg.sender), "Unauthorized: only government or authorized inspector");
+        }
+
         batches[batchId].sustainable = sustainable;
         emit SustainabilityUpdated(batchId, sustainable);
     }
@@ -65,7 +81,7 @@ contract FisheriesManagement {
     function raiseDispute(
         uint256 batchId,
         string memory reason
-    ) public onlyGovernment {
+    ) public onlyGovernment { // *************************************
         batches[batchId].inDispute = true;
         emit DisputeRaised(batchId, reason);
     }
@@ -73,10 +89,7 @@ contract FisheriesManagement {
 
 
 
-function getFishBatch(uint256 batchId)
-    external
-    view
-    returns (
+function getFishBatch(uint256 batchId) external view returns (
         uint256,
         address,
         uint256,
@@ -85,8 +98,7 @@ function getFishBatch(uint256 batchId)
         bool,
         bool,
         uint256[] memory
-    )
-{
+    ){
     require(batches[batchId].id == batchId, "Batch does not exist");
     FishBatch memory batch = batches[batchId];
     return (
