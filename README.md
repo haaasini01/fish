@@ -1,4 +1,4 @@
-# FishChain
+# Smart Fisheries: Leveraging Blockchain for Government Schemes
 
 ## Project Overview
 
@@ -66,8 +66,8 @@ This decentralized blockchain application provides a comprehensive solution for 
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/ayushkumar912/FishChain.git
-   cd FishChain
+   git clone https://github.com/haaasini01/fish.git
+   cd fish
    cd backend
    ```
 
