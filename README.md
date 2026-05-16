@@ -71,8 +71,8 @@ This decentralized blockchain application provides a comprehensive solution for 
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/haaasini01/fish.git
-   cd fish
+   git clone https://github.com/ayushkumar912/FishChain.git
+   cd FishChain
    cd backend
    ```
 
@@ -92,9 +92,9 @@ This decentralized blockchain application provides a comprehensive solution for 
 
 ## Deployment
 
-Deployment is managed using `hardhat-deploy`. Scripts are stored in the `deploy` directory.
+Deployment is managed using `hardhat-deploy` for the smart contracts, and Kubernetes manifests for the backend/frontend application.
 
-### Deploying to a Local Network
+### Deploying the Contracts Locally
 
 1. Start a local blockchain:
    ```bash
@@ -105,20 +105,40 @@ Deployment is managed using `hardhat-deploy`. Scripts are stored in the `deploy`
    ```bash
    npx hardhat deploy --network localhost
    ```
-3. Run the backend server 
+
+### Kubernetes Deployment
+
+The repository includes Kubernetes manifests under the `k8s/` directory.
+
+1. Build Docker images locally:
    ```bash
-   nodemon app.js
+   docker build -t fish-backend:latest ./backend
+   docker build -t fish-frontend:latest ./Frontend
    ```
 
-4. Url generated for interaction
+2. Apply the Kubernetes manifests:
+   ```bash
+   kubectl apply -f k8s/namespace.yaml
+   kubectl apply -f k8s/backend-configmap.yaml
+   kubectl apply -f k8s/backend-secret.yaml
+   kubectl apply -f k8s/backend-deployment.yaml
+   kubectl apply -f k8s/backend-service.yaml
+   kubectl apply -f k8s/frontend-deployment.yaml
+   kubectl apply -f k8s/frontend-service.yaml
+   kubectl apply -f k8s/ingress.yaml
    ```
-   http://localhost:8080/api/function
+
+3. Verify pods and services:
+   ```bash
+   kubectl get pods -n fishchain
+   kubectl get svc -n fishchain
    ```
 
 ### Deploying to Other Networks
 
 1. Ensure the `.env` file is configured with a valid private key.
 2. Add RPC URLs for networks in `hardhat.config.js` if necessary.
+3. Use the Kubernetes deployment process above to run the backend/frontend in cluster mode.
 
 ## Testing
 
@@ -154,6 +174,21 @@ Test scripts are located in the `test` directory.
 ├── scripts/               # mining a block manually
 ├── app.js                 # Backend server
 └── README.md              # Documentation
+- Frontend
+  ├── index.html
+  ├── script.js
+  ├── styles.css
+  └── Dockerfile          # Frontend container image definition
+- k8s
+  ├── namespace.yaml
+  ├── backend-configmap.yaml
+  ├── backend-secret.yaml
+  ├── backend-deployment.yaml
+  ├── backend-service.yaml
+  ├── frontend-deployment.yaml
+  ├── frontend-service.yaml
+  ├── ingress.yaml
+  └── README.md           # Kubernetes deployment guide
 ```
 
 ---
