@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fishchain-ingress
+  namespace: fishchain
+  annotations:
+    kubernetes.io/ingress.class: nginx
+spec:
+  rules:
+    - host: fishchain.local
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: fishchain-backend
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fishchain-frontend
+                port:
+                  number: 80

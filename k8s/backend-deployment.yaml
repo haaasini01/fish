@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fishchain-backend
+  namespace: fishchain
+  labels:
+    app: fishchain-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fishchain-backend
+  template:
+    metadata:
+      labels:
+        app: fishchain-backend
+    spec:
+      containers:
+        - name: backend
+          image: fish-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: fishchain-backend-config
+            - secretRef:
+                name: fishchain-backend-secret
+          readinessProbe:
+            httpGet:
+              path: /api/test
+              port: 8080
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/test
+              port: 8080
+            initialDelaySeconds: 30
+            timeoutSeconds: 5
+            periodSeconds: 20
+            failureThreshold: 3
