@@ -30,6 +30,11 @@ This decentralized blockchain application provides a comprehensive solution for 
 - Dynamic pricing mechanism
 - Adjusts fish prices based on sustainability and freshness factors
 
+### 6. Govt.sol
+- Governs administrative roles and policy enforcement
+- Defines the government account that controls access-restricted actions
+- Ensures only authorized government actors can manage inspectors and sustainability policies
+
 ## 🔑 Key Features
 
 - **Sustainability Tracking**: Government can mark fish batches as sustainable
